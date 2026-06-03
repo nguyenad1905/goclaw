@@ -108,3 +108,5 @@ ui/web/nginx.staging.conf
 /*.sql
 scripts/docker-patch-*.sql
 .agent/*
+/.agent/*
+/.understand-anything/*
