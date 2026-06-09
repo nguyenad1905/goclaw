@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"bytes"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -114,5 +117,49 @@ func TestPersistMedia_NamingScheme(t *testing.T) {
 				t.Fatalf("disk name %q does not match ext pattern %q", base, c.wantExtPat)
 			}
 		})
+	}
+}
+
+// TestPersistMedia_PNGPreservesFormat verifies that a real PNG input retains
+// .png extension and image/png MIME after persistMedia (alpha channel preserved).
+func TestPersistMedia_PNGPreservesFormat(t *testing.T) {
+	workspace := t.TempDir()
+
+	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("png.Encode: %v", err)
+	}
+	srcPath := filepath.Join(t.TempDir(), "sprite.png")
+	if err := os.WriteFile(srcPath, buf.Bytes(), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var loop Loop
+	refs := loop.persistMedia("session-key-png", []bus.MediaFile{{
+		Path:     srcPath,
+		MimeType: "image/png",
+		Filename: "sprite.png",
+	}}, workspace)
+	if len(refs) != 1 {
+		t.Fatalf("got %d refs, want 1", len(refs))
+	}
+
+	ref := refs[0]
+
+	if ref.MimeType != "image/png" {
+		t.Fatalf("MimeType = %q, want %q", ref.MimeType, "image/png")
+	}
+
+	if ext := filepath.Ext(ref.Path); ext != ".png" {
+		t.Fatalf("output extension = %q, want .png", ext)
+	}
+
+	data, err := os.ReadFile(ref.Path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if len(data) < 4 || !bytes.Equal(data[:4], []byte("\x89PNG")) {
+		t.Fatalf("output file does not have PNG magic bytes, got first 4 bytes: %x", data[:4])
 	}
 }

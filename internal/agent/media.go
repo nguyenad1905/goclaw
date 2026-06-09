@@ -148,6 +148,7 @@ const maxImageBytes = 10 * 1024 * 1024
 
 // loadImages reads local image files and returns base64-encoded ImageContent slices.
 // Non-image files and files that fail to read are skipped with a warning log.
+// Images are sanitized (resized + compressed) for LLM vision API limits.
 func loadImages(files []bus.MediaFile) []providers.ImageContent {
 	if len(files) == 0 {
 		return nil
@@ -163,10 +164,15 @@ func loadImages(files []bus.MediaFile) []providers.ImageContent {
 			continue
 		}
 
-		data, err := os.ReadFile(f.Path)
+		data, sanitizeMime, err := media.SanitizeForVision(f.Path, mime)
 		if err != nil {
-			slog.Warn("vision: failed to read image file", "path", f.Path, "error", err)
-			continue
+			slog.Warn("vision: sanitize failed, reading original", "path", f.Path, "error", err)
+			data, err = os.ReadFile(f.Path)
+			if err != nil {
+				slog.Warn("vision: failed to read image file", "path", f.Path, "error", err)
+				continue
+			}
+			sanitizeMime = mime
 		}
 		if len(data) > maxImageBytes {
 			slog.Warn("vision: image file too large, skipping", "path", f.Path, "size", len(data))
@@ -174,7 +180,7 @@ func loadImages(files []bus.MediaFile) []providers.ImageContent {
 		}
 
 		images = append(images, providers.ImageContent{
-			MimeType: mime,
+			MimeType: sanitizeMime,
 			Data:     base64.StdEncoding.EncodeToString(data),
 		})
 	}
@@ -212,17 +218,17 @@ func (l *Loop) persistMedia(sessionKey string, files []bus.MediaFile, workspace 
 		}
 		kind := mediaKindFromMime(mime)
 
-		// Sanitize images before persistent storage.
+		// Preserve image format for persistent storage (PNG alpha, etc).
 		srcPath := f.Path
 		var sanitizedTemp string // track temp file for cleanup
 		if kind == "image" {
-			sanitized, err := SanitizeImage(f.Path)
+			preserved, preservedMime, err := media.PreserveFormat(f.Path)
 			if err != nil {
-				slog.Warn("media: sanitize image failed, using original", "path", f.Path, "error", err)
+				slog.Warn("media: preserve format failed, using original", "path", f.Path, "error", err)
 			} else {
-				srcPath = sanitized
-				sanitizedTemp = sanitized
-				mime = "image/jpeg" // sanitized output is always JPEG
+				srcPath = preserved
+				sanitizedTemp = preserved
+				mime = preservedMime // preserve original format when possible
 			}
 		}
 

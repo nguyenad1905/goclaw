@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nextlevelbuilder/goclaw/internal/media"
 	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	usagecaps "github.com/nextlevelbuilder/goclaw/internal/usage/caps"
 )
@@ -217,13 +218,18 @@ func (t *ReadImageTool) loadImageFromPath(ctx context.Context, path string) ([]p
 		return nil, fmt.Errorf("image file too large (%d bytes, max %d)", fi.Size(), maxImageFileBytes)
 	}
 
-	data, err := os.ReadFile(resolved)
+	data, sanitizeMime, err := media.SanitizeForVision(resolved, mime)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read image file: %w", err)
+		slog.Warn("read_image: sanitize failed, reading original", "path", resolved, "error", err)
+		data, err = os.ReadFile(resolved)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read image file: %w", err)
+		}
+		sanitizeMime = mime
 	}
 
 	return []providers.ImageContent{{
-		MimeType: mime,
+		MimeType: sanitizeMime,
 		Data:     base64.StdEncoding.EncodeToString(data),
 	}}, nil
 }
