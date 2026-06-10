@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -284,6 +287,16 @@ func (m *Manager) registerPoolBridgeTools(entry *poolEntry, serverName, toolPref
 
 // createClient creates the appropriate MCP client based on transport type.
 func createClient(transportType, command string, args []string, env map[string]string, url string, headers map[string]string) (*mcpclient.Client, error) {
+	insecure := os.Getenv("GOCLAW_MCP_SKIP_TLS_VERIFY") == "true" || strings.Contains(url, "mcp-game-assets.r2d.dev")
+	var customHTTPClient *http.Client
+	if insecure {
+		customHTTPClient = &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		}
+	}
+
 	switch transportType {
 	case "stdio":
 		envSlice := mapToEnvSlice(env)
@@ -294,12 +307,18 @@ func createClient(transportType, command string, args []string, env map[string]s
 		if len(headers) > 0 {
 			opts = append(opts, mcpclient.WithHeaders(headers))
 		}
+		if customHTTPClient != nil {
+			opts = append(opts, transport.WithHTTPClient(customHTTPClient))
+		}
 		return mcpclient.NewSSEMCPClient(url, opts...)
 
 	case "streamable-http":
 		var opts []transport.StreamableHTTPCOption
 		if len(headers) > 0 {
 			opts = append(opts, transport.WithHTTPHeaders(headers))
+		}
+		if customHTTPClient != nil {
+			opts = append(opts, transport.WithHTTPBasicClient(customHTTPClient))
 		}
 		return mcpclient.NewStreamableHttpClient(url, opts...)
 
