@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -37,6 +39,9 @@ func SetAllowLoopbackForTest(allow bool) {
 
 // blockedCIDRs lists all CIDRs that must never be dialed.
 var blockedCIDRs []*net.IPNet
+
+// allowedCIDRs lists all CIDRs that bypass the SSRF blocklist.
+var allowedCIDRs []*net.IPNet
 
 func init() {
 	cidrs := []string{
@@ -65,10 +70,39 @@ func init() {
 		}
 		blockedCIDRs = append(blockedCIDRs, ipNet)
 	}
+
+	// Parse allowlist from environment
+	if allowlist := os.Getenv("GOCLAW_SSRF_ALLOWLIST"); allowlist != "" {
+		for _, cidr := range strings.Split(allowlist, ",") {
+			cidr = strings.TrimSpace(cidr)
+			if cidr == "" {
+				continue
+			}
+			// If it's a plain IP, convert it to a /32 or /128 CIDR
+			if !strings.Contains(cidr, "/") {
+				if strings.Contains(cidr, ":") {
+					cidr = cidr + "/128"
+				} else {
+					cidr = cidr + "/32"
+				}
+			}
+			_, ipNet, err := net.ParseCIDR(cidr)
+			if err != nil {
+				slog.Warn("security: invalid CIDR in GOCLAW_SSRF_ALLOWLIST, ignoring", "cidr", cidr, "error", err)
+				continue
+			}
+			allowedCIDRs = append(allowedCIDRs, ipNet)
+		}
+	}
 }
 
-// isBlocked returns true if ip falls within any blocked CIDR.
+// isBlocked returns true if ip falls within any blocked CIDR and is not in an allowed CIDR.
 func isBlocked(ip net.IP) bool {
+	for _, cidr := range allowedCIDRs {
+		if cidr.Contains(ip) {
+			return false
+		}
+	}
 	for _, cidr := range blockedCIDRs {
 		if cidr.Contains(ip) {
 			return true
