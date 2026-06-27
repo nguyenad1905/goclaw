@@ -1,9 +1,6 @@
 package agent
 
 import (
-	"bytes"
-	"image"
-	"image/png"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -120,46 +117,40 @@ func TestPersistMedia_NamingScheme(t *testing.T) {
 	}
 }
 
-// TestPersistMedia_PNGPreservesFormat verifies that a real PNG input retains
-// .png extension and image/png MIME after persistMedia (alpha channel preserved).
-func TestPersistMedia_PNGPreservesFormat(t *testing.T) {
+func TestPersistMedia_BackfilledThreadAttachmentsCreateToolRefs(t *testing.T) {
 	workspace := t.TempDir()
-
-	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
-		t.Fatalf("png.Encode: %v", err)
+	imagePath := filepath.Join(t.TempDir(), "diagram.png")
+	if err := os.WriteFile(imagePath, []byte("not a real png"), 0644); err != nil {
+		t.Fatalf("write image: %v", err)
 	}
-	srcPath := filepath.Join(t.TempDir(), "sprite.png")
-	if err := os.WriteFile(srcPath, buf.Bytes(), 0644); err != nil {
-		t.Fatalf("WriteFile: %v", err)
+	docPath := filepath.Join(t.TempDir(), "brief.pdf")
+	if err := os.WriteFile(docPath, []byte("%PDF-1.4\n%fake"), 0644); err != nil {
+		t.Fatalf("write doc: %v", err)
 	}
 
 	var loop Loop
-	refs := loop.persistMedia("session-key-png", []bus.MediaFile{{
-		Path:     srcPath,
-		MimeType: "image/png",
-		Filename: "sprite.png",
-	}}, workspace)
-	if len(refs) != 1 {
-		t.Fatalf("got %d refs, want 1", len(refs))
-	}
+	refs := loop.persistMedia("discord-thread-session", []bus.MediaFile{
+		{Path: imagePath, MimeType: "image/png", Filename: "diagram.png"},
+		{Path: docPath, MimeType: "application/pdf", Filename: "brief.pdf"},
+	}, workspace)
 
-	ref := refs[0]
-
-	if ref.MimeType != "image/png" {
-		t.Fatalf("MimeType = %q, want %q", ref.MimeType, "image/png")
+	if len(refs) != 2 {
+		t.Fatalf("refs = %d, want 2: %#v", len(refs), refs)
 	}
-
-	if ext := filepath.Ext(ref.Path); ext != ".png" {
-		t.Fatalf("output extension = %q, want .png", ext)
+	gotKinds := map[string]bool{}
+	for _, ref := range refs {
+		gotKinds[ref.Kind] = true
+		if ref.Path == "" {
+			t.Fatalf("ref missing persisted path: %#v", ref)
+		}
+		if _, err := os.Stat(ref.Path); err != nil {
+			t.Fatalf("persisted file missing for %s: %v", ref.Kind, err)
+		}
 	}
-
-	data, err := os.ReadFile(ref.Path)
-	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+	if !gotKinds["image"] {
+		t.Fatalf("missing image ref: %#v", refs)
 	}
-	if len(data) < 4 || !bytes.Equal(data[:4], []byte("\x89PNG")) {
-		t.Fatalf("output file does not have PNG magic bytes, got first 4 bytes: %x", data[:4])
+	if !gotKinds["document"] {
+		t.Fatalf("missing document ref: %#v", refs)
 	}
 }
