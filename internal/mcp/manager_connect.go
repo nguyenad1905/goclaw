@@ -2,11 +2,8 @@ package mcp
 
 import (
 	"context"
-<<<<<<< HEAD
 	"crypto/tls"
-=======
 	"encoding/json"
->>>>>>> origin/dev
 	"fmt"
 	"log/slog"
 	"net/http"
