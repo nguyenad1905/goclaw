@@ -67,7 +67,16 @@ func (r *MethodRouter) Handle(ctx context.Context, client *Client, req *protocol
 	// Permission check: skip for connect, health, and browser pairing status (used by unauthenticated clients)
 	if req.Method != protocol.MethodConnect && req.Method != protocol.MethodHealth && req.Method != protocol.MethodBrowserPairingStatus {
 		if pe := r.server.policyEngine; pe != nil {
-			if !pe.CanAccess(client.role, req.Method) {
+			// provisionScopeAllowed implements the narrow method-scoped
+			// exception for operator.provision credentials (issue #1524, a
+			// regression from the CVE #866 fail-closed hardening). The tenant
+			// handlers already admit ScopeProvision on tenants.create and
+			// tenants.users.add, but the role-only check below maps
+			// provision-only keys to viewer and rejects them before the
+			// handler runs. The exception grants exactly those two methods to
+			// credentials carrying ScopeProvision — no role promotion, and
+			// every other admin/write surface stays denied.
+			if !pe.CanAccess(client.role, req.Method) && !provisionScopeAllowed(client, req.Method) {
 				required := permissions.MethodRole(req.Method)
 				slog.Warn("security.permission_denied",
 					"method", req.Method,
@@ -119,6 +128,13 @@ func (r *MethodRouter) registerDefaults() {
 	r.Register(protocol.MethodConnect, r.handleConnect)
 	r.Register(protocol.MethodHealth, r.handleHealth)
 	r.Register(protocol.MethodStatus, r.handleStatus)
+}
+
+// provisionScopeAllowed reports whether a client carrying the operator.provision
+// scope may call the given method. True only for the two tenant-provisioning
+// RPCs — see permissions.IsProvisionMethod.
+func provisionScopeAllowed(c *Client, method string) bool {
+	return permissions.HasProvisionScope(c.scopes) && permissions.IsProvisionMethod(method)
 }
 
 // --- Built-in handlers ---
@@ -259,7 +275,6 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 			return
 		}
 		if paired {
-			client.role = permissions.RoleOperator
 			client.authenticated = true
 			client.userID = params.UserID
 			client.pairedSenderID = params.SenderID
@@ -269,8 +284,35 @@ func (r *MethodRouter) handleConnect(ctx context.Context, client *Client, req *p
 				client.SendResponse(protocol.NewErrorResponse(req.ID, errCode, "tenant access revoked"))
 				return
 			}
+			// When the caller didn't pass a tenant hint and resolution fell
+			// back to master, try to infer a working tenant from the user's
+			// memberships. A single membership is unambiguous; with multiple,
+			// require an explicit hint and stay on master.
+			hint := params.TenantHint
+			if hint == "" {
+				hint = params.TenantID
+			}
+			if hint == "" && tid == store.MasterTenantID && r.tenantStore != nil && params.UserID != "" {
+				if memberships, err := r.tenantStore.ListUserTenants(ctx, params.UserID); err == nil && len(memberships) == 1 {
+					tid = memberships[0].TenantID
+				}
+			}
 			client.tenantID = tid
-			slog.Info("browser pairing authenticated", "sender_id", params.SenderID, "client", client.id, "tenant_id", client.tenantID)
+			// Derive the gateway role from the user's tenant_users.role for
+			// the resolved tenant. Falling back to RoleOperator preserves the
+			// pre-3.11 behaviour for users without a tenant membership row.
+			client.role = permissions.RoleOperator
+			if r.tenantStore != nil && params.UserID != "" {
+				if tRole, _ := r.getUserTenantRole(ctx, tid, params.UserID); tRole != "" {
+					client.role = permissions.RoleFromTenantRole(tRole)
+				}
+			}
+			slog.Info("browser pairing authenticated",
+				"sender_id", params.SenderID,
+				"client", client.id,
+				"tenant_id", client.tenantID,
+				"role", string(client.role),
+			)
 			r.sendConnectResponse(ctx, client, req.ID)
 			return
 		}

@@ -27,7 +27,7 @@ func NewPipeline(setup, iteration, finalize []Stage, deps PipelineDeps) *Pipelin
 }
 
 // NewDefaultPipeline creates the standard 8-stage pipeline.
-// Setup: [ContextStage]. Iteration: [ThinkStage, PruneStage, ToolStage, ObserveStage, CheckpointStage].
+// Setup: [ContextStage]. Iteration: [PruneStage, ThinkStage, ToolStage, ObserveStage, CheckpointStage].
 // Finalize: [FinalizeStage].
 func NewDefaultPipeline(deps PipelineDeps) *Pipeline {
 	d := &deps
@@ -37,8 +37,8 @@ func NewDefaultPipeline(deps PipelineDeps) *Pipeline {
 		NewContextStage(d),
 	}
 	iteration := []Stage{
-		NewThinkStage(d),
 		NewPruneStage(d, memFlush),
+		NewThinkStage(d),
 		NewToolStage(d),
 		NewObserveStage(d),
 		NewCheckpointStage(d),
@@ -67,7 +67,7 @@ func (p *Pipeline) Run(ctx context.Context, state *RunState) (*RunResult, error)
 	// 2. Iteration loop
 	// BreakLoop: complete all remaining stages in this iteration (ObserveStage must
 	// capture FinalContent), then exit the outer loop.
-	// AbortRun: exit inner loop immediately (unrecoverable, e.g. over budget after compaction).
+	// AbortRun: exit inner loop immediately (unrecoverable, e.g. truncation retries exhausted).
 	for state.Iteration = 0; state.Iteration < p.Deps.Config.MaxIterations; state.Iteration++ {
 		for _, stage := range p.iteration {
 			if err := stage.Execute(ctx, state); err != nil {

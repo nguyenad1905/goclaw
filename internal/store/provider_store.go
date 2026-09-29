@@ -13,6 +13,7 @@ const (
 	ProviderOpenAICompat    = "openai_compat"
 	ProviderGeminiNative    = "gemini_native"
 	ProviderOpenRouter      = "openrouter"
+	ProviderAIMLAPI         = "aimlapi"
 	ProviderGroq            = "groq"
 	ProviderDeepSeek        = "deepseek"
 	ProviderMistral         = "mistral"
@@ -35,6 +36,9 @@ const (
 	ProviderBytePlusCoding  = "byteplus_coding" // BytePlus ModelArk Coding Plan
 	ProviderVertex          = "vertex"          // Google Cloud Vertex AI (OAuth2 service account + ADC)
 	ProviderKimiCoding      = "kimi_coding"     // Moonshot Kimi Coding (OpenAI-compat, requires fixed User-Agent)
+	ProviderAtlasCloud      = "atlascloud"      // Atlas Cloud (OpenAI-compatible endpoint)
+	ProviderAPIRoute        = "api_route"       // API Route (OpenAI-compatible endpoint)
+	ProviderRequesty        = "requesty"        // Requesty (OpenAI-compatible router)
 
 	// MiniMax defaults.
 	MiniMaxDefaultAPIBase = "https://api.minimax.io/v1"
@@ -60,6 +64,19 @@ const (
 	KimiCodingDefaultAPIBase    = "https://api.kimi.com/coding/v1"
 	KimiCodingDefaultModel      = "kimi-k2-turbo-preview"
 	KimiCodingRequiredUserAgent = "claude-code/0.1.0"
+
+	// Atlas Cloud defaults.
+	AtlasCloudDefaultAPIBase = "https://api.atlascloud.ai/v1"
+	AtlasCloudDefaultModel   = "qwen/qwen3.5-flash"
+
+	// API Route defaults.
+	APIRouteDefaultAPIBase = "https://global.api-route.com/v1"
+	APIRouteDefaultModel   = "gpt-5.4-mini"
+
+	// Requesty defaults. Regional endpoints (e.g. https://router.eu.requesty.ai/v1)
+	// can be set through api_base.
+	RequestyDefaultAPIBase = "https://router.requesty.ai/v1"
+	RequestyDefaultModel   = "openai/gpt-4o-mini"
 )
 
 // Vertex AI constants live in internal/providers/vertex.go to avoid a store→providers import cycle
@@ -72,6 +89,7 @@ var ValidProviderTypes = map[string]bool{
 	ProviderOpenAICompat:    true,
 	ProviderGeminiNative:    true,
 	ProviderOpenRouter:      true,
+	ProviderAIMLAPI:         true,
 	ProviderGroq:            true,
 	ProviderDeepSeek:        true,
 	ProviderMistral:         true,
@@ -94,6 +112,9 @@ var ValidProviderTypes = map[string]bool{
 	ProviderBytePlusCoding:  true,
 	ProviderVertex:          true,
 	ProviderKimiCoding:      true,
+	ProviderAtlasCloud:      true,
+	ProviderAPIRoute:        true,
+	ProviderRequesty:        true,
 }
 
 // VertexProviderSettings holds Vertex-specific config stored in llm_providers.settings JSONB.
@@ -151,6 +172,27 @@ type ProviderReasoningConfig struct {
 	Fallback string `json:"fallback,omitempty" db:"-"`
 }
 
+// OllamaSettings holds Ollama-specific configuration stored in the provider settings JSONB.
+type OllamaSettings struct {
+	// NumCtx overrides the context window size sent in options.num_ctx on every request.
+	// When nil, the gateway queries the Ollama API (/api/show) for the model's native
+	// context length, falling back to 131072 if the API is unreachable.
+	NumCtx *int `json:"num_ctx,omitempty" db:"-"`
+}
+
+// ParseOllamaSettings extracts Ollama-specific config from a provider's settings JSONB.
+// Returns nil when no relevant settings are present.
+func ParseOllamaSettings(settings json.RawMessage) *OllamaSettings {
+	if len(settings) == 0 {
+		return nil
+	}
+	var s OllamaSettings
+	if json.Unmarshal(settings, &s) != nil || s.NumCtx == nil {
+		return nil
+	}
+	return &s
+}
+
 // ChatGPTOAuthProviderSettings holds provider-level defaults for Codex account pooling.
 type ChatGPTOAuthProviderSettings struct {
 	CodexPool *ChatGPTOAuthRoutingConfig `json:"codex_pool,omitempty" db:"-"`
@@ -169,6 +211,24 @@ func ParseEmbeddingSettings(settings json.RawMessage) *EmbeddingSettings {
 		return nil
 	}
 	return s.Embedding
+}
+
+// ParseThinkingEnabled extracts the provider-level override for whether the
+// provider should be asked to emit visible reasoning/thinking tokens (e.g.
+// Ollama native "think" field, OpenAI-compat "think" for Ollama endpoints).
+// Returns nil when unset in settings JSONB, meaning "use provider default"
+// (currently off for Ollama). Explicit true/false overrides that default.
+func ParseThinkingEnabled(settings json.RawMessage) *bool {
+	if len(settings) == 0 {
+		return nil
+	}
+	var s struct {
+		ThinkingEnabled *bool `json:"thinking_enabled"`
+	}
+	if json.Unmarshal(settings, &s) != nil {
+		return nil
+	}
+	return s.ThinkingEnabled
 }
 
 // ParseChatGPTOAuthProviderSettings extracts provider-level Codex pool defaults from settings JSONB.

@@ -692,6 +692,13 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     timeout_sec  INT DEFAULT 60,
     settings     TEXT NOT NULL DEFAULT '{}',
     enabled      BOOLEAN NOT NULL DEFAULT 1,
+    -- require_user_credentials mirrors settings.require_user_credentials but
+    -- promoted to a top-level column so the Bitrix24 channel factory can
+    -- filter mcp_servers directly (indexable) rather than parse the full
+    -- JSONB per row. false = shared admin api_key applies to every caller.
+    -- true = the server mints credentials per-user at message time (Bitrix24
+    -- auto-onboard etc.).
+    require_user_credentials BOOLEAN NOT NULL DEFAULT 0,
     created_by   VARCHAR(255) NOT NULL,
     tenant_id    TEXT NOT NULL REFERENCES tenants(id),
     created_at   TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -1166,6 +1173,7 @@ CREATE TABLE IF NOT EXISTS channel_pending_messages (
     id              TEXT NOT NULL PRIMARY KEY,
     channel_name    VARCHAR(100) NOT NULL,
     history_key     VARCHAR(200) NOT NULL,
+    parent_history_key VARCHAR(200) NOT NULL DEFAULT '',
     sender          VARCHAR(255) NOT NULL,
     sender_id       VARCHAR(255) NOT NULL DEFAULT '',
     body            TEXT NOT NULL,
@@ -1177,7 +1185,34 @@ CREATE TABLE IF NOT EXISTS channel_pending_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_channel_pending_messages_lookup ON channel_pending_messages(channel_name, history_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_channel_pending_messages_parent ON channel_pending_messages(channel_name, parent_history_key) WHERE parent_history_key <> '';
 CREATE INDEX IF NOT EXISTS idx_channel_pending_messages_tenant ON channel_pending_messages(tenant_id);
+
+-- ============================================================
+-- Table: channel_message_archive
+-- ============================================================
+-- Append-only copy of every pending message taken before it leaves the buffer.
+-- Rows keep their original id so a replayed delete cannot duplicate them.
+
+CREATE TABLE IF NOT EXISTS channel_message_archive (
+    id                 TEXT NOT NULL PRIMARY KEY,
+    channel_name       VARCHAR(100) NOT NULL,
+    history_key        VARCHAR(200) NOT NULL,
+    parent_history_key VARCHAR(200) NOT NULL DEFAULT '',
+    sender             VARCHAR(255) NOT NULL,
+    sender_id          VARCHAR(255) NOT NULL DEFAULT '',
+    body               TEXT NOT NULL,
+    platform_msg_id    VARCHAR(100) NOT NULL DEFAULT '',
+    is_summary         BOOLEAN NOT NULL DEFAULT 0,
+    tenant_id          TEXT NOT NULL REFERENCES tenants(id),
+    created_at         TEXT NOT NULL,
+    updated_at         TEXT NOT NULL,
+    archived_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    archive_reason     VARCHAR(20) NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_channel_message_archive_lookup ON channel_message_archive(tenant_id, channel_name, history_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_channel_message_archive_archived_at ON channel_message_archive(tenant_id, archived_at);
 
 -- ============================================================
 -- Table: channel_memory_extraction_runs
@@ -1242,7 +1277,7 @@ CREATE TABLE IF NOT EXISTS channel_memory_extraction_items (
     episodic_id         VARCHAR(64) NOT NULL DEFAULT '',
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    UNIQUE (tenant_id, run_id, item_hash)
+    UNIQUE (tenant_id, channel_instance_id, item_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_channel_memory_items_channel_status
@@ -1377,6 +1412,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
     input_tokens  BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens  BIGINT NOT NULL DEFAULT 0,
+    cache_read_tokens   BIGINT NOT NULL DEFAULT 0,
+    cache_create_tokens BIGINT NOT NULL DEFAULT 0,
+    thinking_tokens     BIGINT NOT NULL DEFAULT 0,
     cost_usd      NUMERIC(12,6) NOT NULL DEFAULT 0,
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     call_count    INTEGER NOT NULL DEFAULT 1,
@@ -1419,6 +1457,9 @@ CREATE TABLE IF NOT EXISTS usage_event_rollups (
     input_tokens  BIGINT NOT NULL DEFAULT 0,
     output_tokens BIGINT NOT NULL DEFAULT 0,
     total_tokens  BIGINT NOT NULL DEFAULT 0,
+    cache_read_tokens   BIGINT NOT NULL DEFAULT 0,
+    cache_create_tokens BIGINT NOT NULL DEFAULT 0,
+    thinking_tokens     BIGINT NOT NULL DEFAULT 0,
     cost_usd      NUMERIC(12,6) NOT NULL DEFAULT 0,
     duration_ms   INTEGER NOT NULL DEFAULT 0,
     call_count    INTEGER NOT NULL DEFAULT 0,
@@ -1663,6 +1704,7 @@ CREATE INDEX IF NOT EXISTS idx_system_configs_tenant ON system_configs(tenant_id
 CREATE TABLE IF NOT EXISTS subagent_tasks (
     id                TEXT PRIMARY KEY,
     tenant_id         TEXT NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    root_agent_id     TEXT REFERENCES agents(id) ON DELETE SET NULL,
     parent_agent_key  VARCHAR(255) NOT NULL,
     session_key       VARCHAR(500),
     subject           VARCHAR(255) NOT NULL,
@@ -1691,6 +1733,39 @@ CREATE TABLE IF NOT EXISTS subagent_tasks (
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_parent_status ON subagent_tasks(tenant_id, parent_agent_key, status);
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_session ON subagent_tasks(session_key);
 CREATE INDEX IF NOT EXISTS idx_subagent_tasks_created ON subagent_tasks(tenant_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_subagent_tasks_root_status
+    ON subagent_tasks(tenant_id, root_agent_id, status, created_at DESC)
+    WHERE root_agent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_subagent_tasks_root_session
+    ON subagent_tasks(tenant_id, root_agent_id, session_key, created_at DESC)
+    WHERE root_agent_id IS NOT NULL AND session_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_subagent_tasks_root_archive
+    ON subagent_tasks(tenant_id, root_agent_id, completed_at, id)
+    WHERE root_agent_id IS NOT NULL
+      AND status IN ('completed', 'failed', 'cancelled')
+      AND archived_at IS NULL;
+CREATE TRIGGER IF NOT EXISTS trg_subagent_tasks_root_tenant_insert
+BEFORE INSERT ON subagent_tasks
+WHEN NEW.root_agent_id IS NOT NULL
+ AND NOT EXISTS (
+     SELECT 1 FROM agents
+     WHERE agents.id = NEW.root_agent_id
+       AND agents.tenant_id = NEW.tenant_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'subagent root agent belongs to another tenant');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_subagent_tasks_root_tenant_update
+BEFORE UPDATE OF root_agent_id, tenant_id ON subagent_tasks
+WHEN NEW.root_agent_id IS NOT NULL
+ AND NOT EXISTS (
+     SELECT 1 FROM agents
+     WHERE agents.id = NEW.root_agent_id
+       AND agents.tenant_id = NEW.tenant_id
+ )
+BEGIN
+    SELECT RAISE(ABORT, 'subagent root agent belongs to another tenant');
+END;
 
 -- ============================================================
 -- Table: episodic_summaries (V3 Tier 2 memory)

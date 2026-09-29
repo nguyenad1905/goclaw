@@ -14,7 +14,7 @@ type ContextState struct {
 	MemorySection  string // L0 auto-injected memory context for system prompt
 	Summary        string // session summary for context continuity
 	HadBootstrap   bool
-	OverheadTokens int // system prompt + context files (accurate via TokenCounter)
+	OverheadTokens int // system prompt + tool schemas, in BudgetCounter units
 
 	// EffectiveContextWindow is the context window size (in tokens) resolved
 	// per-run from the provider/model pair via ModelRegistry. Resolved ONCE in
@@ -29,11 +29,18 @@ type ContextState struct {
 
 // ThinkState: owned by ThinkStage.
 type ThinkState struct {
-	LastResponse    *providers.ChatResponse
-	TotalUsage      providers.Usage
-	TruncRetries    int  // consecutive truncation retries (max 3)
-	OverflowRetries int  // context overflow compact+retry attempts (max 1)
-	StreamingActive bool // true during active stream
+	LastResponse *providers.ChatResponse
+	TotalUsage   providers.Usage
+	// LastUsage snapshots the most recent iteration that reported prompt tokens.
+	// Unlike TotalUsage (run-cumulative), it reflects the actual size of the last
+	// prompt sent to the model — the session's current context. Consumed by
+	// FinalizeStage → UpdateMetadata → SetLastPromptTokens for the sessions
+	// context-usage display and compaction calibration.
+	LastUsage         providers.Usage
+	TruncRetries      int  // consecutive truncation retries (max 3)
+	OverflowRetries   int  // context overflow compact+retry attempts (max 1)
+	EmptyReplyRetries int  // consecutive empty final-reply nudges (max maxEmptyReplyRetries)
+	StreamingActive   bool // true during active stream
 
 	// Tools is populated by ContextStage (iteration=0) for overhead calculation.
 	// It holds the best-effort tool list at run start and is used exclusively by
@@ -83,6 +90,10 @@ type ObserveState struct {
 	// in iter N and responds text-only in iter N+1, reading only LastResponse.Images
 	// would lose the image.
 	AssistantImages []providers.ImageContent
+
+	// Post-model-response hook blocking.
+	BlockedByHook       bool   // true if post_model_response hook blocked delivery
+	HookRejectionReason string // rejection reason from hook, injected as user message
 }
 
 // CompactState: owned by CheckpointStage + MemoryFlushStage.
@@ -90,6 +101,7 @@ type CompactState struct {
 	CheckpointFlushedMsgs  int
 	MemoryFlushedThisCycle bool
 	CompactionCount        int
+	Unavailable            bool // CompactMessages returned ErrNotCompacted: don't retry this run
 }
 
 // EvolutionState: owned by skill evolution nudge logic.
@@ -108,6 +120,7 @@ type RunResult struct {
 	Content        string
 	Thinking       string
 	TotalUsage     providers.Usage
+	LastUsage      providers.Usage
 	Iterations     int
 	ToolCalls      int
 	LoopKilled     bool
@@ -117,4 +130,6 @@ type RunResult struct {
 	Deliverables   []string
 	BlockReplies   int
 	LastBlockReply string
+	Calls          []providers.CallUsage
+	StopReason     string
 }

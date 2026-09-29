@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/nextlevelbuilder/goclaw/internal/providers"
 	"github.com/nextlevelbuilder/goclaw/internal/store"
 )
 
@@ -111,24 +112,32 @@ func TestProvidersHandlerListProviderModelsChatGPTOAuthIncludesReasoningMetadata
 		t.Fatalf("reasoning_defaults.effort = %q, want high", result.ReasoningDefaults.Effort)
 	}
 
-	var found bool
-	for _, model := range result.Models {
-		if model.ID != "gpt-5.5" {
-			continue
+	assertModelIDsInOrder(t, result.Models, []string{
+		"gpt-5.6-sol",
+		"gpt-5.6-terra",
+		"gpt-5.5",
+	})
+
+	for _, wantID := range []string{"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.5"} {
+		var found bool
+		for _, model := range result.Models {
+			if model.ID != wantID {
+				continue
+			}
+			found = true
+			if model.Reasoning == nil {
+				t.Fatalf("%s reasoning = nil, want capability metadata", wantID)
+			}
+			if model.Reasoning.DefaultEffort != "medium" {
+				t.Fatalf("%s default_effort = %q, want medium", wantID, model.Reasoning.DefaultEffort)
+			}
+			if got := model.Reasoning.Levels; len(got) != 5 || got[4] != "xhigh" {
+				t.Fatalf("%s levels = %#v, want none..xhigh", wantID, got)
+			}
 		}
-		found = true
-		if model.Reasoning == nil {
-			t.Fatal("gpt-5.5 reasoning = nil, want capability metadata")
+		if !found {
+			t.Fatalf("%s not found in ChatGPT OAuth model list", wantID)
 		}
-		if model.Reasoning.DefaultEffort != "medium" {
-			t.Fatalf("gpt-5.5 default_effort = %q, want medium", model.Reasoning.DefaultEffort)
-		}
-		if got := model.Reasoning.Levels; len(got) != 5 || got[4] != "xhigh" {
-			t.Fatalf("gpt-5.5 levels = %#v, want none..xhigh", got)
-		}
-	}
-	if !found {
-		t.Fatal("gpt-5.5 not found in ChatGPT OAuth model list")
 	}
 }
 
@@ -385,6 +394,108 @@ func TestOpenAIModelsAPIBaseDefaultsKimiCoding(t *testing.T) {
 	}
 	if got := openAIModelsAPIBase(store.ProviderOpenAICompat, ""); got != "https://api.openai.com/v1" {
 		t.Fatalf("OpenAI compat default api base = %q", got)
+	}
+}
+
+func TestProvidersHandlerListProviderModelsRequestyMergesManagedAndCatalog(t *testing.T) {
+	token := setupProvidersAdminToken(t)
+	var capturedAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedAuth = r.Header.Get("Authorization")
+		var ids []string
+		switch r.URL.Path {
+		case "/models/managed":
+			ids = []string{"claude-sonnet-4-5", "gpt-5-mini@eu"}
+		case "/models":
+			ids = []string{"openai/gpt-4o-mini", "claude-sonnet-4-5"}
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		data := make([]map[string]string, 0, len(ids))
+		for _, id := range ids {
+			data = append(data, map[string]string{"id": id})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"object": "list", "data": data})
+	}))
+	t.Cleanup(upstream.Close)
+
+	providerStore := newMockProviderStore()
+	provider := &store.LLMProviderData{
+		BaseModel:    store.BaseModel{ID: uuid.New()},
+		Name:         "requesty",
+		ProviderType: store.ProviderRequesty,
+		APIBase:      upstream.URL,
+		APIKey:       "requesty-key",
+		Enabled:      true,
+	}
+	if err := providerStore.CreateProvider(t.Context(), provider); err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+
+	handler := NewProvidersHandler(providerStore, newMockSecretsStore(), nil, "")
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+
+	result := providerModelsRequest(t, mux, provider.ID, token)
+	if capturedAuth != "Bearer requesty-key" {
+		t.Fatalf("Authorization = %q, want Bearer requesty-key", capturedAuth)
+	}
+	want := []string{"claude-sonnet-4-5", "gpt-5-mini@eu", "openai/gpt-4o-mini"}
+	if len(result.Models) != len(want) {
+		t.Fatalf("models = %#v, want %v", result.Models, want)
+	}
+	for index, model := range result.Models {
+		if model.ID != want[index] {
+			t.Errorf("models[%d].ID = %q, want %q", index, model.ID, want[index])
+		}
+	}
+}
+
+func TestOpenAIModelsAPIBaseDefaultsRequesty(t *testing.T) {
+	if got := openAIModelsAPIBase(store.ProviderRequesty, ""); got != store.RequestyDefaultAPIBase {
+		t.Fatalf("Requesty default api base = %q, want %q", got, store.RequestyDefaultAPIBase)
+	}
+}
+
+func TestProvidersHandlerListProviderModelsAIMLAPIUsesCuratedCatalog(t *testing.T) {
+	token := setupProvidersAdminToken(t)
+	providerStore := newMockProviderStore()
+	provider := &store.LLMProviderData{
+		BaseModel:    store.BaseModel{ID: uuid.New()},
+		Name:         "aimlapi",
+		ProviderType: store.ProviderAIMLAPI,
+		APIBase:      "http://127.0.0.1:1",
+		APIKey:       "aimlapi-key",
+		Enabled:      true,
+	}
+	if err := providerStore.CreateProvider(t.Context(), provider); err != nil {
+		t.Fatalf("CreateProvider() error = %v", err)
+	}
+
+	handler := NewProvidersHandler(providerStore, newMockSecretsStore(), nil, "")
+	mux := http.NewServeMux()
+	handler.RegisterRoutes(mux)
+	req := httptest.NewRequest(http.MethodGet, "/v1/providers/"+provider.ID.String()+"/models", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want %d, body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var result ProviderModelsResponse
+	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	want := providers.AIMLAPIChatModels()
+	if len(result.Models) != len(want) {
+		t.Fatalf("models = %#v, want %d curated models", result.Models, len(want))
+	}
+	for index, model := range result.Models {
+		if model.ID != want[index] {
+			t.Errorf("models[%d].ID = %q, want %q", index, model.ID, want[index])
+		}
 	}
 }
 

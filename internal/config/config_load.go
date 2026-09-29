@@ -97,6 +97,9 @@ func Default() *Config {
 			Telegram: TelegramConfig{
 				ReactionLevel: "full",
 			},
+			Discord: DiscordConfig{
+				HistoryLimit: 200,
+			},
 		},
 		Gateway: GatewayConfig{
 			Host:            "0.0.0.0",
@@ -156,6 +159,12 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_ANTHROPIC_BASE_URL", &c.Providers.Anthropic.APIBase)
 	envStr("GOCLAW_OPENAI_API_KEY", &c.Providers.OpenAI.APIKey)
 	envStr("GOCLAW_OPENAI_BASE_URL", &c.Providers.OpenAI.APIBase)
+	envStr("GOCLAW_ATLASCLOUD_API_KEY", &c.Providers.AtlasCloud.APIKey)
+	envStr("GOCLAW_ATLASCLOUD_BASE_URL", &c.Providers.AtlasCloud.APIBase)
+	envStr("GOCLAW_API_ROUTE_API_KEY", &c.Providers.APIRoute.APIKey)
+	envStr("GOCLAW_API_ROUTE_BASE_URL", &c.Providers.APIRoute.APIBase)
+	envStr("GOCLAW_REQUESTY_API_KEY", &c.Providers.Requesty.APIKey)
+	envStr("GOCLAW_REQUESTY_BASE_URL", &c.Providers.Requesty.APIBase)
 	envStr("GOCLAW_OPENROUTER_API_KEY", &c.Providers.OpenRouter.APIKey)
 	envStr("GOCLAW_GROQ_API_KEY", &c.Providers.Groq.APIKey)
 	envStr("GOCLAW_DEEPSEEK_API_KEY", &c.Providers.DeepSeek.APIKey)
@@ -181,6 +190,7 @@ func (c *Config) applyEnvOverrides() {
 	envStr("GOCLAW_VERTEX_REGION", &c.Providers.Vertex.Region)
 	envStr("GOCLAW_VERTEX_MODEL", &c.Providers.Vertex.Model)
 	envStr("GOCLAW_GATEWAY_TOKEN", &c.Gateway.Token)
+	envStr("GOCLAW_MCP_SERVER_TOKEN", &c.Gateway.MCPServerToken)
 	envStr("GOCLAW_TELEGRAM_TOKEN", &c.Channels.Telegram.Token)
 	envStr("GOCLAW_DISCORD_TOKEN", &c.Channels.Discord.Token)
 	envStr("GOCLAW_ZALO_TOKEN", &c.Channels.Zalo.Token)
@@ -390,6 +400,7 @@ func (c *Config) applyEnvOverrides() {
 
 	// Browser (for Docker-compose browser sidecar overlay)
 	envStr("GOCLAW_BROWSER_REMOTE_URL", &c.Tools.Browser.RemoteURL)
+	envStr("GOCLAW_BROWSER_BACKEND", &c.Tools.Browser.Backend)
 	if c.Tools.Browser.RemoteURL != "" {
 		c.Tools.Browser.Enabled = true
 	}

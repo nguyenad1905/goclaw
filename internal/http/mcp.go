@@ -18,9 +18,14 @@ import (
 	"github.com/nextlevelbuilder/goclaw/pkg/protocol"
 )
 
-// MCPToolLister returns discovered tool names for a specific MCP server.
+// MCPToolLister returns discovered tool names/info for a specific MCP server.
 type MCPToolLister interface {
 	ServerToolNames(serverName string) []string
+	// ServerToolInfos returns the original (bare, unprefixed) tool name and
+	// real description for each tool of an already-connected server. Bare
+	// names match the shape returned by mcp.DiscoverTools, so callers don't
+	// have to special-case "already connected" vs. "on-demand discovery".
+	ServerToolInfos(serverName string) []mcp.ToolInfo
 }
 
 // MCPPoolEvictor evicts pooled connections for a tenant+server (called on credential rotation).
@@ -40,6 +45,7 @@ type MCPHandler struct {
 	db            *sql.DB                  // for export/import direct queries
 	oauthProvider MCPOAuthTokenProvider    // optional, nil when OAuth not configured
 	oauthStore    store.MCPOAuthTokenStore // optional, nil when OAuth not configured
+	discoverTools func(context.Context, string, string, []string, map[string]string, string, map[string]string) ([]mcp.ToolInfo, error)
 }
 
 // MCPOAuthTokenProvider retrieves a valid OAuth Bearer token for an MCP server.
@@ -50,7 +56,12 @@ type MCPOAuthTokenProvider interface {
 
 // NewMCPHandler creates a handler for MCP server management endpoints.
 func NewMCPHandler(s store.MCPServerStore, msgBus *bus.MessageBus, mgr MCPToolLister) *MCPHandler {
-	return &MCPHandler{store: s, msgBus: msgBus, mgr: mgr}
+	return &MCPHandler{
+		store:         s,
+		msgBus:        msgBus,
+		mgr:           mgr,
+		discoverTools: mcp.DiscoverTools,
+	}
 }
 
 // SetPoolEvictor sets the pool evictor for credential rotation handling.

@@ -17,7 +17,9 @@ type ProvidersData = Record<string, ProviderEntry>;
 const KNOWN_PROVIDERS = [
   { key: "anthropic", label: "Anthropic", envKey: "GOCLAW_ANTHROPIC_API_KEY" },
   { key: "openai", label: "OpenAI", envKey: "GOCLAW_OPENAI_API_KEY" },
+  { key: "api_route", label: "API Route", envKey: "GOCLAW_API_ROUTE_API_KEY" },
   { key: "openrouter", label: "OpenRouter", envKey: "GOCLAW_OPENROUTER_API_KEY" },
+  { key: "requesty", label: "Requesty", envKey: "GOCLAW_REQUESTY_API_KEY" },
   { key: "groq", label: "Groq", envKey: "GOCLAW_GROQ_API_KEY" },
   { key: "gemini", label: "Gemini", envKey: "GOCLAW_GEMINI_API_KEY" },
   { key: "deepseek", label: "DeepSeek", envKey: "GOCLAW_DEEPSEEK_API_KEY" },
@@ -74,7 +76,7 @@ export function ProvidersSection({ data, onSave, saving }: Props) {
       }
       toSave[key] = clean;
     }
-    onSave(toSave);
+    onSave(toSave).catch(() => {});
   };
 
   if (!data) return null;
