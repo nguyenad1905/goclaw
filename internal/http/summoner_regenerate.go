@@ -110,7 +110,12 @@ func (s *AgentSummoner) isGenerated(existingMap map[string]string, fileName stri
 	return content != template
 }
 
+// summonMaxTokens caps summoning output. Reasoning models spend part of this on
+// hidden thinking, so it must leave room for all generated files on top of that.
+const summonMaxTokens = 32768
+
 // generateFiles calls the LLM and parses the XML-tagged response into file map.
+// A truncated response (finish_reason=length) is rejected so partial files are never stored.
 func (s *AgentSummoner) generateFiles(ctx context.Context, providerName, model, prompt string) (map[string]string, error) {
 	provider, err := s.resolveProvider(ctx, providerName)
 	if err != nil {
@@ -130,7 +135,7 @@ func (s *AgentSummoner) generateFiles(ctx context.Context, providerName, model, 
 		},
 		Model: model,
 		Options: map[string]any{
-			"max_tokens":              8192,
+			"max_tokens":              summonMaxTokens,
 			"temperature":             0.7,
 			providers.OptSessionKey:   summonSessionKey,
 			providers.OptDisableTools: true,
@@ -140,15 +145,26 @@ func (s *AgentSummoner) generateFiles(ctx context.Context, providerName, model, 
 		ProviderName:    providerName,
 		ModelID:         model,
 		Purpose:         "agent-summoner",
-		MaxOutputTokens: 8192,
+		MaxOutputTokens: summonMaxTokens,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", providerName, err)
 	}
 
+	var outTokens, thinkTokens int
+	if resp.Usage != nil {
+		outTokens, thinkTokens = resp.Usage.CompletionTokens, resp.Usage.ThinkingTokens
+	}
 	slog.Info("summoning: raw LLM response", "provider", providerName, "length", len(resp.Content),
+		"finish_reason", resp.FinishReason, "thinking_len", len(resp.Thinking),
+		"output_tokens", outTokens, "thinking_tokens", thinkTokens,
 		"preview_start", truncateUTF8(resp.Content, 500),
 		"preview_end", truncateUTF8(suffixString(resp.Content, 500), 500))
+
+	if resp.FinishReason == "length" {
+		return nil, fmt.Errorf("LLM output truncated at %d max tokens (response length: %d, thinking length: %d)",
+			summonMaxTokens, len(resp.Content), len(resp.Thinking))
+	}
 
 	files := parseFileResponse(resp.Content)
 	if len(files) == 0 {
